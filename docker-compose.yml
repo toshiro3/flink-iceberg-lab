@@ -1,0 +1,151 @@
+services:
+  # ===========================================
+  # Flink JobManager: クラスタのマスターノード
+  # ジョブの受付・スケジューリング・監視を担当
+  # ===========================================
+  jobmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: jobmanager
+    ports:
+      - "8081:8081"  # Flink Web UI
+    command: jobmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        state.savepoints.dir: file:///tmp/flink-savepoints
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - flink-net
+
+  # ===========================================
+  # Flink TaskManager: クラスタのワーカーノード
+  # 実際のタスク（データ処理）を実行
+  # ===========================================
+  taskmanager:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: taskmanager
+    depends_on:
+      - jobmanager
+    command: taskmanager
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        state.backend: rocksdb
+        state.checkpoints.dir: file:///tmp/flink-checkpoints
+        state.savepoints.dir: file:///tmp/flink-savepoints
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    networks:
+      - flink-net
+
+  # ===========================================
+  # Flink SQL Client: 対話的にFlink SQLを実行
+  # ===========================================
+  sql-client:
+    build:
+      context: ./flink
+      dockerfile: Dockerfile
+    container_name: sql-client
+    depends_on:
+      - jobmanager
+      - rest-catalog
+    environment:
+      - |
+        FLINK_PROPERTIES=
+        jobmanager.rpc.address: jobmanager
+        rest.address: jobmanager
+        rest.port: 8081
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./sql:/opt/flink/sql
+    networks:
+      - flink-net
+    stdin_open: true
+    tty: true
+
+  # ===========================================
+  # REST Catalog: Icebergカタログサーバー
+  # ===========================================
+  rest-catalog:
+    image: tabulario/iceberg-rest:1.6.0
+    container_name: rest-catalog
+    ports:
+      - "8181:8181"
+    environment:
+      - AWS_ACCESS_KEY_ID=admin
+      - AWS_SECRET_ACCESS_KEY=password
+      - AWS_REGION=us-east-1
+      - CATALOG_WAREHOUSE=s3://warehouse/
+      - CATALOG_IO__IMPL=org.apache.iceberg.aws.s3.S3FileIO
+      - CATALOG_S3_ENDPOINT=http://minio:9000
+      - CATALOG_S3_PATH__STYLE__ACCESS=true
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    networks:
+      - flink-net
+    restart: on-failure
+
+  # ===========================================
+  # MinIO: S3互換オブジェクトストレージ
+  # ===========================================
+  minio:
+    image: minio/minio:latest
+    container_name: minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=admin
+      - MINIO_ROOT_PASSWORD=password
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flink-net
+
+  # ===========================================
+  # MinIO初期設定: warehouseバケット作成
+  # ===========================================
+  minio-init:
+    image: minio/mc:latest
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set myminio http://minio:9000 admin password;
+      mc mb myminio/warehouse --ignore-existing;
+      mc anonymous set public myminio/warehouse;
+      echo 'Bucket created successfully';
+      exit 0;
+      "
+    networks:
+      - flink-net
+
+networks:
+  flink-net:
+    driver: bridge

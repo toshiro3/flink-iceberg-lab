@@ -1,0 +1,11 @@
+# MinIO data
+minio-data/*
+!minio-data/.gitkeep
+
+# Warehouse data
+warehouse/*
+!warehouse/.gitkeep
+
+# OS files
+.DS_Store
+Thumbs.db
